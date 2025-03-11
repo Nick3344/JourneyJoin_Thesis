@@ -1,0 +1,127 @@
+.find-people-container {
+    max-width: 800px;
+    margin: 2rem auto;
+    background-color: #fff;
+    border-radius: 6px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    padding: 1.5rem;
+  }
+  
+  .find-people-container h2 {
+    text-align: center;
+    color: #007BFF;
+    margin-bottom: 1rem;
+  }
+  
+  .find-people-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+  
+  .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  
+  .form-group label {
+    font-weight: 500;
+  }
+  
+  .small-inline {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  
+  .find-people-form input[type="text"],
+  .find-people-form input[type="number"],
+  .find-people-form textarea {
+    padding: 0.5rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 1rem;
+  }
+  
+  .checkboxes-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+  
+  .checkbox-item {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  
+  .submit-button {
+    align-self: flex-start;
+    background-color: #007BFF;
+    color: #fff;
+    border: none;
+    padding: 0.6rem 1.2rem;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+  }
+  
+  .submit-button:hover {
+    background-color: #0056b3;
+  }
+  
+  .loading-indicator,
+  .error-message {
+    text-align: center;
+    margin-top: 1rem;
+    font-size: 1.1rem;
+    color: #777;
+  }
+  
+  .error-message {
+    color: #ff4d4d;
+  }
+  
+  .results-container {
+    margin-top: 2rem;
+  }
+  
+  .results-container h3 {
+    color: #007BFF;
+    margin-bottom: 1rem;
+  }
+  
+  .users-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  
+  .user-card {
+    display: flex;
+    gap: 1rem;
+    background-color: #f9f9f9;
+    border-radius: 6px;
+    padding: 1rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  }
+  
+  .user-card:hover {
+    background-color: #f0f8ff;
+  }
+  
+  .user-pic {
+    width: 80px;
+    height: 80px;
+    object-fit: cover;
+    border-radius: 4px;
+  }
+  
+  .user-info h4 {
+    margin: 0;
+    font-size: 1.1rem;
+  }
+  

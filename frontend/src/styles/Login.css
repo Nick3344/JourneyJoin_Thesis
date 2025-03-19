@@ -1,0 +1,21 @@
+.login-container {
+    max-width: 500px;
+    margin: 2rem auto;
+    padding: 1.5rem;
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    text-align: center;
+  }
+  
+  .link-text {
+    margin-top: 1rem;
+    font-size: 1rem;
+  }
+  
+  .link {
+    color: #007BFF;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  

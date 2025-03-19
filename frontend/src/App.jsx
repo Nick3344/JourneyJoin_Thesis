@@ -8,6 +8,11 @@ import ProtectedRoute from "./components/ProtectedRoute"
 import Profile from "./pages/Profile";
 import FindPeople from "./pages/FindPeople";
 import Matches from "./pages/Matches";
+import GuideRegister from "./pages/GuideRegister";
+import GuideLogin from "./pages/GuideLogin"; 
+import GuideHome from "./pages/GuideHome";
+import GuideProfile from "./pages/GuideProfile";
+import GuideSearch from './pages/GuideSearch';
 
 
 function Logout() {
@@ -62,7 +67,20 @@ function App() {
             </ProtectedRoute>
           }
         />
+        <Route
+          path="/guide/home"
+          element={<GuideHome />}
+        />
+        <Route
+          path="/guide/profile"
+          element={
+            <GuideProfile />
+          }
+        />
         <Route path="*" element={<NotFound />} />
+        <Route path="/guide/register/" element={<GuideRegister />} />
+        <Route path="/guide/login" element={<GuideLogin />} />
+        <Route path="/guide/search" element={<GuideSearch />} />
       </Routes>
     </BrowserRouter>
   )

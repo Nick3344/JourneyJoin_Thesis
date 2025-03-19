@@ -3,8 +3,9 @@ import json
 import traceback
 from datetime import timedelta
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import or_
 from flask_jwt_extended import (
     JWTManager, create_access_token, create_refresh_token,
     jwt_required, get_jwt_identity
@@ -15,7 +16,7 @@ from flask_migrate import Migrate
 import openai
 
 from config import Config
-from models import db, User
+from models import db, User, Guide
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
@@ -26,7 +27,9 @@ def create_app():
     db.init_app(app)
     jwt = JWTManager(app)
     migrate = Migrate(app, db)
-    CORS(app)
+    #CORS(app)
+    CORS(app, resources={r"/*": {"origins": "http://localhost:5173"}}, supports_credentials=True)
+
 
     @app.route("/")
     def index():
@@ -315,7 +318,289 @@ def create_app():
         return prompt
 
 
+
+    @app.route("/guide/register", methods=["POST", "OPTIONS"])
+    @app.route("/guide/register/", methods=["POST", "OPTIONS"])
+    @cross_origin(origins="http://localhost:5173", supports_credentials=True)
+    def guide_register():
+        if request.method == "OPTIONS":
+            response = jsonify({})
+            response.status_code = 200
+            response.headers["Access-Control-Allow-Origin"] = "http://localhost:5173"
+            response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
+            return response
+
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({"error": "No input data provided"}), 400
+
+            username = data.get("username")
+            password = data.get("password")
+            if not username or not password:
+                return jsonify({"error": "Username and password are required"}), 400
+
+            # Check if a guide with this username already exists
+            existing_guide = Guide.query.filter_by(username=username).first()
+            if existing_guide:
+                return jsonify({"error": "Guide with that username already exists"}), 409
+
+            # Create new guide record
+            new_guide = Guide(username, password)
+            db.session.add(new_guide)
+            db.session.commit()
+
+            # Generate tokens with additional guide claim
+            access_token = create_access_token(
+                identity=f"guide_{new_guide.id}",
+                additional_claims={"role": "guide"}
+            )
+            refresh_token = create_refresh_token(
+                identity=f"guide_{new_guide.id}",
+                additional_claims={"role": "guide"}
+            )
+
+            return jsonify({
+                "message": "Guide registered successfully!",
+                "access_token": access_token,
+                "refresh_token": refresh_token
+            }), 201
+
+        except Exception as e:
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+        
+
+    @app.route("/guide/search", methods=["POST"])
+    def search_guides():
+        data = request.get_json() or {}
+        # Extract search filters
+        city = data.get("city", "").strip()
+        country = data.get("country", "").strip()
+        min_experience = data.get("experience_years", 0)
+        min_rating = data.get("rating", 0)
+        selected_services = data.get("service_offerings", [])  # Expect an array
+
+        query = Guide.query
+
+        if city:
+            # Use case-insensitive matching for city
+            query = query.filter(Guide.city.ilike(f"%{city}%"))
+        if country:
+            query = query.filter(Guide.country.ilike(f"%{country}%"))
+        if min_experience:
+            query = query.filter(Guide.experience_years >= min_experience)
+        if min_rating:
+            query = query.filter(Guide.rating >= min_rating)
+        if selected_services and isinstance(selected_services, list):
+            # Since service_offerings is stored as CSV, build a filter checking if any selected service is in that CSV.
+            conditions = []
+            for service in selected_services:
+                conditions.append(Guide.service_offerings.ilike(f"%{service}%"))
+            if conditions:
+                query = query.filter(or_(*conditions))
+
+        guides = query.all()
+
+        # Build the results array
+        results = []
+        for guide in guides:
+            offerings_list = []
+            if guide.service_offerings:
+                offerings_list = [s.strip() for s in guide.service_offerings.split(",") if s.strip()]
+            results.append({
+                "id": guide.id,
+                "username": guide.username,
+                "full_name": guide.full_name,
+                "contact_email": guide.contact_email,
+                "contact_phone": guide.contact_phone,
+                "city": guide.city,
+                "country": guide.country,
+                "bio": guide.bio or "",
+                "experience_years": guide.experience_years,
+                "rating": guide.rating,
+                "service_offerings": offerings_list,
+                "tour_details": guide.tour_details or "",
+                "profile_pic": guide.profile_pic  
+            })
+
+        return jsonify(results), 200
+
+
+
+
+    @app.route("/guide/login", methods=["POST"])
+    def guide_login():
+        data = request.get_json()
+        username = data.get("username")
+        password = data.get("password")
+
+        if not username or not password:
+            return jsonify({"error": "Username and password are required"}), 400
+
+        guide = Guide.query.filter_by(username=username).first()
+        if not guide or not guide.check_password(password):
+            return jsonify({"error": "Invalid guide username or password!"}), 401
+
+        identity = "guide_" + str(guide.id)
+        access_token = create_access_token(
+            identity=identity,
+            additional_claims={"role": "guide"}
+        )
+        refresh_token = create_refresh_token(
+            identity=identity,
+            additional_claims={"role": "guide"}
+        )
+
+        return jsonify({
+            "message": "Guide login successful!",
+            "access_token": access_token,
+            "refresh_token": refresh_token
+        }), 200
+
+
+        
+    @app.route("/guide/profile/upload-pic", methods=["POST"])
+    @jwt_required()
+    def guide_upload_profile_pic():
+        # Retrieve the JWT identity, assuming it is in the format "guide_<id>"
+        identity = get_jwt_identity()
+        if not str(identity).startswith("guide_"):
+            return jsonify({"error": "Unauthorized, not a guide token"}), 403
+
+        try:
+            guide_id = int(str(identity).split("_", 1)[1])
+        except (IndexError, ValueError):
+            return jsonify({"error": "Invalid guide ID in token"}), 403
+
+        # Fetch the guide from the database
+        guide = Guide.query.get(guide_id)
+        if not guide:
+            return jsonify({"error": "Guide not found"}), 404
+
+        if 'file' not in request.files:
+            return jsonify({"error": "No file part in the request"}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
+
+        # Use secure_filename to avoid unsafe filenames
+        filename = secure_filename(file.filename)
+        # Use a unique filename (prefix with "guide_" and guide id)
+        unique_filename = f"guide_{guide.id}_{filename}"
+        # Save in the same folder as users profile pictures
+        save_path = os.path.join("static/profile_pics", unique_filename)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        file.save(save_path)
+
+        # Update the guide's profile_pic field with the file path
+        guide.profile_pic = save_path
+        db.session.commit()
+
+        return jsonify({"message": "Guide profile picture uploaded successfully"}), 200
+
+        
+    
+
+    @app.route("/guide/profile", methods=["GET"])
+    @jwt_required()
+    def get_guide_profile():
+        identity = get_jwt_identity()  
+        print("DEBUG: JWT identity in GET /guide/profile:", identity)
+        if not str(identity).startswith("guide_"):
+            return jsonify({"error": "Unauthorized; not a guide token."}), 403
+
+        try:
+            guide_id = int(str(identity).split("_", 1)[1])
+        except Exception as e:
+            print("DEBUG: Error parsing guide ID:", e)
+            return jsonify({"error": "Invalid token identity format"}), 403
+
+        guide = Guide.query.get(guide_id)
+        if not guide:
+            return jsonify({"error": "Guide not found"}), 404
+
+        offerings_list = []
+        if guide.service_offerings:
+            offerings_list = [o.strip() for o in guide.service_offerings.split(",") if o.strip()]
+
+        return jsonify({
+            "id": guide.id,
+            "username": guide.username,
+            "full_name": guide.full_name,
+            "contact_email": guide.contact_email,
+            "contact_phone": guide.contact_phone,
+            "city": guide.city,
+            "country": guide.country,
+            "bio": guide.bio or "",
+            "experience_years": guide.experience_years,
+            "rating": guide.rating,
+            "service_offerings": offerings_list,
+            "tour_details": guide.tour_details or ""
+        }), 200
+
+    @app.route("/guide/profile", methods=["PUT"])
+    @jwt_required()
+    def update_guide_profile():
+        identity = get_jwt_identity()  
+        print("DEBUG: JWT identity in PUT /guide/profile:", identity)
+        if not str(identity).startswith("guide_"):
+            return jsonify({"error": "Unauthorized; not a guide token."}), 403
+
+        try:
+            guide_id = int(str(identity).split("_", 1)[1])
+        except Exception as e:
+            print("DEBUG: Error parsing guide ID in PUT:", e)
+            return jsonify({"error": "Invalid token identity format"}), 403
+
+        guide = Guide.query.get(guide_id)
+        if not guide:
+            return jsonify({"error": "Guide not found"}), 404
+
+        data = request.get_json() or {}
+        print("DEBUG: Received PUT data:", data)
+
+        try:
+            guide.full_name = data.get("full_name", guide.full_name)
+            guide.contact_email = data.get("contact_email", guide.contact_email)
+            guide.contact_phone = data.get("contact_phone", guide.contact_phone)
+            guide.city = data.get("city", guide.city)
+            guide.country = data.get("country", guide.country)
+            guide.bio = data.get("bio", guide.bio)
+
+            if "experience_years" in data:
+                guide.experience_years = int(data["experience_years"])
+            if "rating" in data:
+                guide.rating = float(data["rating"])
+
+            if "service_offerings" in data and isinstance(data["service_offerings"], list):
+                guide.service_offerings = ", ".join(data["service_offerings"])
+            # Tour details as plain text
+            if "tour_details" in data:
+                guide.tour_details = data["tour_details"]
+
+            print("DEBUG: Guide object before commit:", guide.__dict__)
+            db.session.commit()
+            return jsonify({"message": "Guide profile updated successfully"}), 200
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+
+
+
+
+
+
+
+
+        
     return app
+
+
+
 
 if __name__ == "__main__":
     app = create_app()

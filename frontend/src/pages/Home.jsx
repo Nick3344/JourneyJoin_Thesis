@@ -60,13 +60,11 @@ function Home() {
           <div className="card-label">Your Trips</div>
         </div>
 
-        <div
-          className="feature-card"
-          onClick={() => navigate("/local-guides")} 
-        >
+        <div className="feature-card" onClick={() => navigate("/guide/search")}>
           <div className="card-icon">📍</div>
           <div className="card-label">Local Guides</div>
         </div>
+
       </div>
     </div>
   );

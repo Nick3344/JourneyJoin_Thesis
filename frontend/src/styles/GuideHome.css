@@ -1,0 +1,44 @@
+.guide-home-container {
+    max-width: 900px;
+    margin: 2rem auto;
+    text-align: center;
+  }
+  
+  .guide-home-container h2 {
+    margin-bottom: 1rem;
+  }
+  
+  .guide-cards-container {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 2rem;
+    margin-top: 2rem;
+  }
+  
+  .guide-card {
+    background-color: #fff;
+    border-radius: 8px;
+    width: 260px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    cursor: pointer;
+    transition: background-color 0.2s ease-in-out;
+    text-align: left;
+  }
+  
+  .guide-card:hover {
+    background-color: #f5f5f5;
+  }
+  
+  .guide-card h3 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+  }
+  
+  .guide-card p {
+    margin: 0;
+    color: #555;
+    line-height: 1.4;
+  }
+  

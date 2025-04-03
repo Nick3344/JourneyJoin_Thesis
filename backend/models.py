@@ -20,6 +20,7 @@ class User(db.Model):
     interests = db.Column(db.Text, nullable=True)  # store as JSON string
     successful_trips = db.Column(db.Integer, default=0)
     credibility_score = db.Column(db.Float, default=0.0)
+    acs_id = db.Column(db.String(255), nullable=True)
 
     def __init__(self, username, password):
         self.username = username
@@ -61,7 +62,7 @@ class Guide(db.Model):
     country = db.Column(db.String(100), nullable=True)
 
     bio = db.Column(db.Text, nullable=True)
-
+    
     areas_of_expertise = db.Column(db.Text, nullable=True)  # e.g. JSON: ["historical", "food", "culture"]
     languages = db.Column(db.Text, nullable=True)          # e.g. JSON: ["English", "Spanish"]
 
@@ -87,6 +88,9 @@ class Guide(db.Model):
     #   }
     # ]
     tour_details = db.Column(db.Text, nullable=True)
+    
+    profile_pic = db.Column(db.String(255), nullable=True)   # path to uploaded file
+
 
     def __init__(self, username, password):
         self.username = username

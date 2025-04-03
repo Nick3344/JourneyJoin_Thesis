@@ -1,0 +1,91 @@
+.guide-matches-container {
+    display: flex;
+    width: 90%;
+    margin: 2rem auto;
+    min-height: 500px;
+    border-radius: 8px;
+    background-color: #fff;
+    box-shadow: 0 3px 6px rgba(0, 0, 0, 0.1);
+  }
+  
+  .guide-matches-left {
+    width: 40%;
+    padding: 1rem;
+    border-right: 1px solid #eee;
+    background-color: #f9f9f9;
+    overflow-y: auto;
+  }
+  
+  .guide-matches-right {
+    width: 60%;
+    padding: 1rem;
+    overflow-y: auto;
+  }
+  
+  .guide-list-item {
+    padding: 0.8rem;
+    margin-bottom: 0.6rem;
+    border-radius: 4px;
+    cursor: pointer;
+    background-color: #fff;
+    transition: background-color 0.2s ease-in-out;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  }
+  
+  .guide-list-item:hover {
+    background-color: #f0f0f0;
+  }
+  
+  .guide-list-item.selected {
+    background-color: #d0ebff;
+  }
+  
+  .guide-list-name {
+    font-weight: bold;
+    margin-bottom: 0.2rem;
+  }
+  
+  .guide-list-city {
+    color: #666;
+    font-size: 0.9rem;
+  }
+  
+  .guide-list-score {
+    font-size: 0.9rem;
+    margin-top: 0.2rem;
+  }
+  
+  .guide-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  
+  .guide-details-pic {
+    width: 200px;
+    height: 200px;
+    object-fit: cover;
+    border-radius: 50%;
+    margin-bottom: 1rem;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  }
+  
+  .guide-details-pic-placeholder {
+    width: 200px;
+    height: 200px;
+    border-radius: 50%;
+    background-color: #ddd;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 1rem;
+    font-weight: 500;
+    color: #666;
+  }
+  
+  .guide-details-placeholder {
+    text-align: center;
+    color: #aaa;
+    margin-top: 5rem;
+  }
+  

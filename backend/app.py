@@ -8,7 +8,7 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import or_
 from flask_jwt_extended import (
     JWTManager, create_access_token, create_refresh_token,
-    jwt_required, get_jwt_identity
+    jwt_required, get_jwt_identity, get_jwt
 )
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -17,6 +17,24 @@ import openai
 
 from config import Config
 from models import db, User, Guide
+
+from azure.communication.chat import ChatClient
+from azure.communication.chat import CommunicationTokenCredential
+from azure.communication.identity import CommunicationIdentityClient, CommunicationUserIdentifier
+from azure.communication.sms import SmsClient
+from azure.core.credentials import AzureKeyCredential, AccessToken
+#from azure.communication.chat._models import CreateChatThreadRequest
+
+
+class ACSKeyCredential(AzureKeyCredential):
+    def get_token(self, *scopes, **kwargs):
+        # Return a dummy access token using the key as the token value
+        # and a far-future expiry (in epoch seconds). This is a workaround.
+        return AccessToken(self._key, 9999999999)
+
+#connection_string = "endpoint=https://nickcomm.unitedstates.communication.azure.com/;accesskey=2P2k6d0KhkFtEf9mzB3pzVe7VptJtGqYmwEDuVwLiA6v5LgD7gdOJQQJ99BCACULyCpx7CfZAAAAAZCSOuzl"
+#chat_client = ChatClient.from_connection_string(connection_string)
+
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
@@ -56,7 +74,7 @@ def create_app():
         db.session.commit()
 
         return jsonify({"message": "User registered successfully!"}), 201
-
+    
     @app.route("/login", methods=["POST"])
     def login():
         data = request.get_json()
@@ -70,14 +88,37 @@ def create_app():
         if not user or not user.check_password(password):
             return jsonify({"error": "Invalid username or password!"}), 401
 
+        # If the user does not have an ACS ID yet, create one.
+        if not user.acs_id:
+            connection_string = os.getenv("ACS_CONNECTION_STRING")
+            identity_client = CommunicationIdentityClient.from_connection_string(connection_string)
+            acs_user = identity_client.create_user()
+            user.acs_id = acs_user.properties.get("id", None) if hasattr(acs_user, "properties") else acs_user.id
+            db.session.commit()
+
+        # Generate a token for the chat scope for the current user.
+        connection_string = os.getenv("ACS_CONNECTION_STRING")
+        identity_client = CommunicationIdentityClient.from_connection_string(connection_string)
+        # Use the existing ACS ID to create a CommunicationUserIdentifier
+        from azure.communication.identity import CommunicationUserIdentifier
+        user_identifier = CommunicationUserIdentifier(user.acs_id)
+        token_response = identity_client.get_token(user_identifier, scopes=["chat"])
+        acs_token = token_response.token
+
         access_token = create_access_token(identity=str(user.id))
         refresh_token = create_refresh_token(identity=str(user.id))
 
         return jsonify({
             "message": "Login successful!",
             "access_token": access_token,
-            "refresh_token": refresh_token
+            "refresh_token": refresh_token,
+            "user_acs_id": user.acs_id,
+            "user_acs_token": acs_token
         }), 200
+
+
+
+
 
     @app.route("/token/refresh", methods=["POST"])
     @jwt_required(refresh=True)
@@ -95,20 +136,31 @@ def create_app():
     @app.route("/profile", methods=["GET"])
     @jwt_required()
     def get_profile():
-        current_user_id = get_jwt_identity()
-        user = User.query.get(int(current_user_id))
+        # Log the request headers to verify the token is attached
+        print("DEBUG: Request headers:", dict(request.headers))
+        
+        current_user_id = get_jwt_identity()  # Should be a string like "5"
+        print("DEBUG: JWT identity in GET /profile:", current_user_id)
+        
+        try:
+            user = User.query.get(int(current_user_id))
+        except Exception as e:
+            print("DEBUG: Exception converting token identity:", e)
+            return jsonify({"error": "Invalid token identity format"}), 403
+
         if not user:
             return jsonify({"error": "User not found"}), 404
 
         try:
             user_interests = json.loads(user.interests) if user.interests else []
-        except:
+        except Exception as e:
+            print("DEBUG: Exception parsing interests:", e)
             user_interests = []
 
         response = {
             "id": user.id,
             "username": user.username,
-            "created_at": user.created_at,
+            "created_at": str(user.created_at),
             "profile_pic": user.profile_pic,
             "city": user.city,
             "bio": user.bio or "",
@@ -118,11 +170,18 @@ def create_app():
         }
         return jsonify(response), 200
 
+
+
     @app.route("/profile", methods=["PUT"])
     @jwt_required()
     def update_profile():
-        current_user_id = get_jwt_identity()
-        user = User.query.get(int(current_user_id))
+        current_user_id = get_jwt_identity()  # e.g. "5"
+        try:
+            user = User.query.get(int(current_user_id))
+        except Exception as e:
+            print("DEBUG: Exception converting user token identity in PUT:", e)
+            return jsonify({"error": "Invalid token identity format"}), 403
+
         if not user:
             return jsonify({"error": "User not found"}), 404
 
@@ -144,6 +203,7 @@ def create_app():
 
         db.session.commit()
         return jsonify({"message": "Profile updated successfully"}), 200
+
 
     @app.route("/profile/upload-pic", methods=["POST"])
     @jwt_required()
@@ -208,7 +268,8 @@ def create_app():
                     "interests": u_interests,
                     "profile_pic": u.profile_pic,
                     "successful_trips": u.successful_trips,
-                    "credibility_score": u.credibility_score
+                    "credibility_score": u.credibility_score,
+                    "acsId": u.acs_id  # include ACS ID in the input list
                 })
 
             user_input["users"] = user_list
@@ -264,7 +325,8 @@ def create_app():
                             "successful_trips": u.successful_trips,
                             "credibility_score": u.credibility_score,
                             "match_score": rec.get("match_score", 0),
-                            "reason": rec.get("reason", "")
+                            "reason": rec.get("reason", ""),
+                            "acsId": u.acs_id   # <--- Added ACS ID here
                         })
             else:
                 return jsonify({"recommendations": gpt_recs}), 200
@@ -443,15 +505,11 @@ def create_app():
         if not guide or not guide.check_password(password):
             return jsonify({"error": "Invalid guide username or password!"}), 401
 
-        identity = "guide_" + str(guide.id)
-        access_token = create_access_token(
-            identity=identity,
-            additional_claims={"role": "guide"}
-        )
-        refresh_token = create_refresh_token(
-            identity=identity,
-            additional_claims={"role": "guide"}
-        )
+        # Create tokens with identity as a string (e.g., "9")
+        access_token = create_access_token(identity=str(guide.id),
+                                        additional_claims={"role": "guide"})
+        refresh_token = create_refresh_token(identity=str(guide.id),
+                                            additional_claims={"role": "guide"})
 
         return jsonify({
             "message": "Guide login successful!",
@@ -460,21 +518,18 @@ def create_app():
         }), 200
 
 
+
+
         
     @app.route("/guide/profile/upload-pic", methods=["POST"])
     @jwt_required()
     def guide_upload_profile_pic():
-        # Retrieve the JWT identity, assuming it is in the format "guide_<id>"
-        identity = get_jwt_identity()
-        if not str(identity).startswith("guide_"):
-            return jsonify({"error": "Unauthorized, not a guide token"}), 403
-
+        # Now we assume get_jwt_identity() returns a numeric string (e.g., "6")
         try:
-            guide_id = int(str(identity).split("_", 1)[1])
-        except (IndexError, ValueError):
-            return jsonify({"error": "Invalid guide ID in token"}), 403
+            guide_id = int(get_jwt_identity())
+        except Exception as e:
+            return jsonify({"error": "Invalid token identity format"}), 403
 
-        # Fetch the guide from the database
         guide = Guide.query.get(guide_id)
         if not guide:
             return jsonify({"error": "Guide not found"}), 404
@@ -486,39 +541,32 @@ def create_app():
         if file.filename == '':
             return jsonify({"error": "No selected file"}), 400
 
-        # Use secure_filename to avoid unsafe filenames
         filename = secure_filename(file.filename)
-        # Use a unique filename (prefix with "guide_" and guide id)
         unique_filename = f"guide_{guide.id}_{filename}"
-        # Save in the same folder as users profile pictures
         save_path = os.path.join("static/profile_pics", unique_filename)
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         file.save(save_path)
 
-        # Update the guide's profile_pic field with the file path
         guide.profile_pic = save_path
         db.session.commit()
 
         return jsonify({"message": "Guide profile picture uploaded successfully"}), 200
 
+
         
     
-
     @app.route("/guide/profile", methods=["GET"])
     @jwt_required()
     def get_guide_profile():
-        identity = get_jwt_identity()  
-        print("DEBUG: JWT identity in GET /guide/profile:", identity)
-        if not str(identity).startswith("guide_"):
-            return jsonify({"error": "Unauthorized; not a guide token."}), 403
-
+        current_guide_id = get_jwt_identity()  
+        print("DEBUG: JWT identity in GET /guide/profile:", current_guide_id)
+        
         try:
-            guide_id = int(str(identity).split("_", 1)[1])
+            guide = Guide.query.get(int(current_guide_id))
         except Exception as e:
-            print("DEBUG: Error parsing guide ID:", e)
+            print("DEBUG: Exception converting token identity:", e)
             return jsonify({"error": "Invalid token identity format"}), 403
 
-        guide = Guide.query.get(guide_id)
         if not guide:
             return jsonify({"error": "Guide not found"}), 404
 
@@ -541,21 +589,18 @@ def create_app():
             "tour_details": guide.tour_details or ""
         }), 200
 
+
     @app.route("/guide/profile", methods=["PUT"])
     @jwt_required()
     def update_guide_profile():
-        identity = get_jwt_identity()  
-        print("DEBUG: JWT identity in PUT /guide/profile:", identity)
-        if not str(identity).startswith("guide_"):
-            return jsonify({"error": "Unauthorized; not a guide token."}), 403
-
+        current_guide_id = get_jwt_identity()
+        print("DEBUG: JWT identity in PUT /guide/profile:", current_guide_id)
         try:
-            guide_id = int(str(identity).split("_", 1)[1])
+            guide = Guide.query.get(int(current_guide_id))
         except Exception as e:
-            print("DEBUG: Error parsing guide ID in PUT:", e)
+            print("DEBUG: Exception converting token identity in PUT:", e)
             return jsonify({"error": "Invalid token identity format"}), 403
 
-        guide = Guide.query.get(guide_id)
         if not guide:
             return jsonify({"error": "Guide not found"}), 404
 
@@ -577,7 +622,6 @@ def create_app():
 
             if "service_offerings" in data and isinstance(data["service_offerings"], list):
                 guide.service_offerings = ", ".join(data["service_offerings"])
-            # Tour details as plain text
             if "tour_details" in data:
                 guide.tour_details = data["tour_details"]
 
@@ -592,6 +636,522 @@ def create_app():
 
 
 
+    @app.route("/recommend/guides", methods=["POST"])
+    def recommend_guides():
+        try:
+            # 1. Extract search filters from request body
+            data = request.get_json() or {}
+            city = data.get("city", "").strip()
+            country = data.get("country", "").strip()
+            min_experience = data.get("experience_years", 0)
+            min_rating = data.get("rating", 0.0)
+            selected_services = data.get("service_offerings", [])
+
+            print("Received guide search input:", data)
+
+            # 2. Query the Guide table based on filters
+            query = Guide.query
+            if city:
+                query = query.filter(Guide.city.ilike(f"%{city}%"))
+            if country:
+                query = query.filter(Guide.country.ilike(f"%{country}%"))
+            if min_experience:
+                query = query.filter(Guide.experience_years >= min_experience)
+            if min_rating:
+                query = query.filter(Guide.rating >= min_rating)
+            if selected_services and isinstance(selected_services, list):
+                from sqlalchemy import or_
+                conditions = []
+                for service in selected_services:
+                    conditions.append(Guide.service_offerings.ilike(f"%{service}%"))
+                if conditions:
+                    query = query.filter(or_(*conditions))
+            potential_guides = query.all()
+
+            # 3. Build a list of potential guide dictionaries
+            guide_list = []
+            for guide in potential_guides:
+                services_list = []
+                if guide.service_offerings:
+                    services_list = [s.strip() for s in guide.service_offerings.split(",") if s.strip()]
+                guide_list.append({
+                    "id": guide.id,
+                    "full_name": guide.full_name,
+                    "city": guide.city,
+                    "country": guide.country,
+                    "bio": guide.bio or "",
+                    "experience_years": guide.experience_years,
+                    "rating": guide.rating,
+                    "service_offerings": services_list,
+                    "profile_pic": guide.profile_pic or ""
+                })
+
+            # 4. Build the GPT prompt for guide recommendation
+            prompt = f"""
+            The user is searching for local guides in city: {city}, country: {country}.
+            They require a minimum of {min_experience} years of experience and a rating of at least {min_rating}.
+            They are interested in these service offerings: {", ".join(selected_services)}.
+            
+            Below is a JSON list of potential guides:
+            {json.dumps(guide_list, indent=2)}
+            
+            Please analyze these guides and return the top 3 recommended matches as a valid JSON array only.
+            Each recommended guide object should have:
+            {{
+            "id": <guide_id>,
+            "match_score": <number>,
+            "reason": "<brief explanation>"
+            }}
+            Return only the JSON array with no extra text.
+            """
+            print("Generated prompt for GPT:", prompt)
+
+            # 5. Use the second OpenAI API key for guides
+            openai.api_key = os.getenv("OPENAI_API_KEY_GUIDES")
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",  # or your preferred model
+                messages=[
+                    {"role": "system", "content": "You are a local guide recommendation assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=800
+            )
+
+            raw_output = response["choices"][0]["message"]["content"]
+            print("GPT raw output:", raw_output)
+
+            # 6. Parse GPT's JSON output
+            try:
+                gpt_matches = json.loads(raw_output)
+            except json.JSONDecodeError:
+                gpt_matches = []
+                print("Warning: GPT output is not valid JSON.")
+
+            # 7. Merge GPT recommendations with DB data
+            final_recommendations = []
+            if isinstance(gpt_matches, list):
+                recommended_ids = [match.get("id") for match in gpt_matches if "id" in match]
+                matched_guides = Guide.query.filter(Guide.id.in_(recommended_ids)).all()
+                guide_map = {guide.id: guide for guide in matched_guides}
+                for match in gpt_matches:
+                    gid = match.get("id")
+                    if gid in guide_map:
+                        guide = guide_map[gid]
+                        services_list = []
+                        if guide.service_offerings:
+                            services_list = [s.strip() for s in guide.service_offerings.split(",") if s.strip()]
+                        final_recommendations.append({
+                            "id": guide.id,
+                            "full_name": guide.full_name,
+                            "city": guide.city,
+                            "country": guide.country,
+                            "bio": guide.bio or "",
+                            "experience_years": guide.experience_years,
+                            "rating": guide.rating,
+                            "service_offerings": services_list,
+                            "profile_pic": guide.profile_pic or "",
+                            "match_score": match.get("match_score", 0),
+                            "reason": match.get("reason", "")
+                        })
+
+            # 8. Return the final recommendations
+            return jsonify({"recommendations": final_recommendations}), 200
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+
+
+
+    def build_guide_prompt(data, guide_list):
+        city = data.get("city", "")
+        country = data.get("country", "")
+        min_exp = data.get("experience_years", 0)
+        min_rating = data.get("rating", 0.0)
+        serv_offerings = data.get("service_offerings", [])
+
+        guides_json = json.dumps(guide_list, indent=2)
+
+        prompt = f"""
+        The user is looking for local guides in the city: {city}, country: {country},
+        with minimum experience of {min_exp} years, minimum rating of {min_rating},
+        and interested in these services: {", ".join(serv_offerings)}.
+
+        Below is a list of potential guides in JSON:
+
+        {guides_json}
+
+        Please analyze these guides and return the top 3 recommended matches as valid JSON array only.
+        Each recommended item should look like:
+        {{
+        "id": <guide_id>,
+        "match_score": <number>,
+        "reason": "<brief reason>"
+        }}
+
+        Return just the JSON array, no extra text.
+        """
+        return prompt
+
+    
+
+    def create_chat_client(acs_user_id=None, acs_token=None):
+        connection_string = os.getenv("ACS_CONNECTION_STRING")
+        if not connection_string:
+            raise ValueError("ACS_CONNECTION_STRING environment variable is not set.")
+
+        parts = connection_string.split(";")
+        endpoint = None
+        for part in parts:
+            if part.startswith("endpoint="):
+                endpoint = part.split("=", 1)[1]
+        if not endpoint:
+            raise ValueError("Invalid ACS_CONNECTION_STRING format: missing endpoint.")
+
+        # If a token is provided, use it; otherwise, generate a new one.
+        if acs_token is None:
+            identity_client = CommunicationIdentityClient.from_connection_string(connection_string)
+            if acs_user_id:
+                user = CommunicationUserIdentifier(acs_user_id)
+            else:
+                user = identity_client.create_user()
+            token_response = identity_client.get_token(user, scopes=["chat"])
+            acs_token = token_response.token
+
+        credential = CommunicationTokenCredential(acs_token)
+        chat_client = ChatClient(endpoint, credential)
+        return chat_client
+
+
+
+
+    @app.route("/acs/chat/create_thread", methods=["POST"])
+    def create_chat_thread():
+        """
+        Expects JSON with:
+        {
+        "topic": "My first chat thread",
+        "participants": [
+            {
+            "id": "<ACS Communication Identifier>",
+            "displayName": "Alice"
+            },
+            ...
+        ]
+        }
+        """
+        try:
+            data = request.get_json()
+            topic = data.get("topic", "General Topic")
+            participants = data.get("participants", [])
+            
+            chat_client = create_chat_client()
+
+            # Convert the participant list to the ACS required format
+            # Each participant must have:
+            # {
+            #    "id": <CommunicationIdentifier>,
+            #    "displayName": <str>
+            # }
+            response = chat_client.create_chat_thread(
+                topic=topic,
+                participants=participants  
+            )
+            
+            # response is a CreateChatThreadResult
+            chat_thread = response.chat_thread
+            thread_id = chat_thread.id
+            
+            return jsonify({
+                "threadId": thread_id,
+                "topic": chat_thread.topic
+            }), 200
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+        
+    @app.route("/acs/chat/threads", methods=["GET"])
+    def list_chat_threads():
+        try:
+            chat_client = create_chat_client()
+            threads_iter = chat_client.list_chat_threads(results_per_page=50)
+            threads = []
+            for thread_item in threads_iter:
+                threads.append({
+                    "thread_id": thread_item.id,
+                    "topic": thread_item.topic,
+                    "created_on": thread_item.created_on.isoformat() if thread_item.created_on else None
+                    # You can add more fields if needed
+                })
+            return jsonify(threads), 200
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+        
+    @app.route("/acs/chat/add_participant", methods=["POST"])
+    def add_participant_to_thread():
+        """
+        Expects JSON like:
+        {
+        "threadId": "<chat thread ID from ACS>",
+        "participant": {
+            "id": "<ACS user ID>",
+            "displayName": "Bob"
+        }
+        }
+        """
+        try:
+            data = request.get_json()
+            thread_id = data["threadId"]
+            participant = data["participant"]  # e.g. { "id": "...", "displayName": "Bob" }
+
+            chat_client = create_chat_client()
+            thread_client = chat_client.get_chat_thread_client(thread_id)
+
+            thread_client.add_participants(participants=[participant])
+            return jsonify({"message": "Participant added successfully"}), 200
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+
+
+    @app.route("/acs/chat/send_message", methods=["POST"])
+    def send_message_to_thread():
+        data = request.get_json()
+        thread_id = data["threadId"]
+        content = data["content"]
+        sender_display_name = data.get("senderDisplayName", "Unknown")
+        acs_user_id = data.get("acs_user_id")
+        acs_token = data.get("acs_token")
+        if not acs_user_id or not acs_token:
+            return jsonify({"error": "acs_user_id and acs_token are required"}), 400
+
+        chat_client = create_chat_client(acs_user_id, acs_token)
+        thread_client = chat_client.get_chat_thread_client(thread_id)
+        send_result = thread_client.send_message(
+            content=content,
+            sender_display_name=sender_display_name
+        )
+        return jsonify({"messageId": send_result.id}), 200
+
+
+
+        
+    @app.route("/acs/chat/get_messages", methods=["POST"])
+    def get_messages():
+        data = request.get_json()
+        thread_id = data.get("threadId")
+        acs_user_id = data.get("acs_user_id")
+        acs_token = data.get("acs_token")
+        if not thread_id or not acs_user_id or not acs_token:
+            return jsonify({"error": "threadId, acs_user_id and acs_token are required"}), 400
+
+        chat_client = create_chat_client(acs_user_id, acs_token)
+        thread_client = chat_client.get_chat_thread_client(thread_id)
+        
+        messages_iter = thread_client.list_messages(results_per_page=50)
+        messages_list = []
+        for msg in messages_iter:
+            messages_list.append({
+                "id": msg.id,
+                "content": msg.content.message,
+                "senderDisplayName": msg.sender_display_name,
+                "createdOn": msg.created_on.isoformat() if msg.created_on else None
+            })
+        return jsonify(messages_list), 200
+
+
+
+
+
+    @app.route("/acs/chat/get_messages", methods=["POST"])
+    def list_chat_messages():
+        """
+        Expects JSON:
+        {
+        "threadId": "<chat thread ID>"
+        }
+        Returns a list of messages for that thread
+        """
+        try:
+            data = request.get_json()
+            thread_id = data["threadId"]
+
+            chat_client = create_chat_client()  # Your function to create ChatClient
+            thread_client = chat_client.get_chat_thread_client(thread_id)
+
+            messages_iter = thread_client.list_messages(results_per_page=50)
+            messages_list = []
+            for msg in messages_iter:
+                messages_list.append({
+                    "id": msg.id,
+                    "content": msg.content.message,
+                    "senderDisplayName": msg.sender_display_name,
+                    "createdOn": msg.created_on.isoformat() if msg.created_on else None
+                })
+            return jsonify(messages_list), 200
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+        
+    @app.route("/acs/chat/send_message", methods=["POST"])
+    def send_message():
+        """
+        Expects JSON:
+        {
+        "threadId": "<chat thread ID>",
+        "content": "Hello world!",
+        "senderDisplayName": "Alice"
+        }
+        """
+        try:
+            data = request.get_json()
+            thread_id = data["threadId"]
+            content = data["content"]
+            sender_display_name = data.get("senderDisplayName", "Unknown")
+
+            chat_client = create_chat_client()
+            thread_client = chat_client.get_chat_thread_client(thread_id)
+
+            result = thread_client.send_message(
+                content=content,
+                sender_display_name=sender_display_name
+            )
+            return jsonify({"messageId": result.id}), 200
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+
+
+    @app.route("/acs/chat/create_or_get_thread", methods=["POST"])
+    def create_or_get_thread():
+        """
+        Expects JSON like:
+        {
+        "participant1_id": "acsUserIdA",
+        "participant2_id": "acsUserIdB",
+        "topic": "UserA and UserB Chat"
+        }
+        Returns { "threadId": "...", "createdNew": true/false }
+        """
+        try:
+            data = request.get_json()
+            participant1_id = data["participant1_id"]
+            participant2_id = data["participant2_id"]
+            topic = data.get("topic", "New Chat Thread")
+
+            existing_thread_id = check_existing_thread_in_db(participant1_id, participant2_id)
+            if existing_thread_id:
+                return jsonify({"threadId": existing_thread_id, "createdNew": False}), 200
+
+            chat_client = create_chat_client()
+
+            participants = [
+                {
+                    "id": {"communicationUserId": participant1_id},
+                    "displayName": "User1"  # Replace with the actual display name if available
+                },
+                {
+                    "id": {"communicationUserId": participant2_id},
+                    "displayName": "User2"  # Replace with the actual display name if available
+                }
+            ]
+
+            chat_thread_request = {
+                "topic": topic,
+                "participants": participants
+            }
+
+            response = chat_client.create_chat_thread(chat_thread_request)
+            new_thread_id = response.chat_thread.id
+
+            store_new_thread_in_db(participant1_id, participant2_id, new_thread_id)
+
+            return jsonify({"threadId": new_thread_id, "createdNew": True}), 200
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+
+
+    def check_existing_thread_in_db(userA, userB):
+        return None
+
+    def store_new_thread_in_db(userA, userB, thread_id):
+        pass
+
+
+
+
+
+
+    @app.route("/acs/chat/send_read_receipt", methods=["POST"])
+    def send_read_receipt():
+        """
+        Expects JSON like:
+        {
+        "threadId": "...",
+        "messageId": "...",  # the message ID you want to mark as read
+        }
+        """
+        try:
+            data = request.get_json()
+            thread_id = data["threadId"]
+            message_id = data["messageId"]
+
+            chat_client = create_chat_client()
+            thread_client = chat_client.get_chat_thread_client(thread_id)
+            thread_client.send_read_receipt(message_id)
+            return jsonify({"status": "read receipt sent"}), 200
+        except Exception as e:
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route("/acs/chat/list_participants", methods=["POST"])
+    def list_chat_participants():
+        """
+        Expects JSON:
+        {
+        "threadId": "<chat thread ID>",
+        "acs_user_id": "<the user for whom we want to generate a token>"
+        }
+        Returns a list of participants from ACS's perspective.
+        """
+        try:
+            data = request.get_json()
+            thread_id = data["threadId"]
+            acs_user_id = data["acs_user_id"]
+            if not thread_id or not acs_user_id:
+                return jsonify({"error": "threadId and acs_user_id are required"}), 400
+
+            chat_client = create_chat_client(acs_user_id=acs_user_id)
+            thread_client = chat_client.get_chat_thread_client(thread_id)
+            participant_iter = thread_client.list_participants()
+            participants_list = []
+
+            for p in participant_iter:
+                participants_list.append({
+                    "raw_id": p.id.raw_id if hasattr(p.id, "raw_id") else str(p.id),
+                    "display_name": p.display_name
+                })
+
+            return jsonify(participants_list), 200
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
 
 
 

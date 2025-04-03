@@ -12,7 +12,11 @@ import GuideRegister from "./pages/GuideRegister";
 import GuideLogin from "./pages/GuideLogin"; 
 import GuideHome from "./pages/GuideHome";
 import GuideProfile from "./pages/GuideProfile";
-import GuideSearch from './pages/GuideSearch';
+import SearchLocalGuides from "./pages/SearchLocalGuides";
+import GuideMatches from "./pages/GuideMatches";
+import ChatThreads from "./pages/ChatThreads";
+import ThreadDetail from "./pages/ThreadDetail";
+
 
 
 function Logout() {
@@ -80,7 +84,10 @@ function App() {
         <Route path="*" element={<NotFound />} />
         <Route path="/guide/register/" element={<GuideRegister />} />
         <Route path="/guide/login" element={<GuideLogin />} />
-        <Route path="/guide/search" element={<GuideSearch />} />
+        <Route path="/local-guides" element={<SearchLocalGuides />} />
+        <Route path="/local-guides/matches" element={<GuideMatches />} />
+        <Route path="/acs/chat/threads" element={<ChatThreads />} />
+        <Route path="/acs/chat/thread" element={<ThreadDetail />} />
       </Routes>
     </BrowserRouter>
   )

@@ -1,7 +1,7 @@
 import os
 import json
 import traceback
-from datetime import timedelta
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS, cross_origin
 from flask_sqlalchemy import SQLAlchemy
@@ -16,7 +16,7 @@ from flask_migrate import Migrate
 import openai
 
 from config import Config
-from models import db, User, Guide
+from models import ChatThread, db, User, Guide
 
 from azure.communication.chat import ChatClient
 from azure.communication.chat import CommunicationTokenCredential
@@ -96,15 +96,24 @@ def create_app():
             user.acs_id = acs_user.properties.get("id", None) if hasattr(acs_user, "properties") else acs_user.id
             db.session.commit()
 
-        # Generate a token for the chat scope for the current user.
+        # Generate an ACS token for the user
         connection_string = os.getenv("ACS_CONNECTION_STRING")
+        # Extract the endpoint from the connection string
+        acs_endpoint = None
+        for part in connection_string.split(";"):
+            if part.startswith("endpoint="):
+                acs_endpoint = part.split("=", 1)[1]
+                break
+        if not acs_endpoint:
+            return jsonify({"error": "ACS endpoint missing in connection string."}), 500
+
         identity_client = CommunicationIdentityClient.from_connection_string(connection_string)
-        # Use the existing ACS ID to create a CommunicationUserIdentifier
         from azure.communication.identity import CommunicationUserIdentifier
         user_identifier = CommunicationUserIdentifier(user.acs_id)
         token_response = identity_client.get_token(user_identifier, scopes=["chat"])
         acs_token = token_response.token
 
+        # Create your regular JWT tokens
         access_token = create_access_token(identity=str(user.id))
         refresh_token = create_refresh_token(identity=str(user.id))
 
@@ -113,8 +122,10 @@ def create_app():
             "access_token": access_token,
             "refresh_token": refresh_token,
             "user_acs_id": user.acs_id,
-            "user_acs_token": acs_token
+            "user_acs_token": acs_token,
+            "acs_endpoint": acs_endpoint
         }), 200
+
 
 
 
@@ -1034,7 +1045,7 @@ def create_app():
             return jsonify({"error": str(e)}), 500
 
 
-    @app.route("/acs/chat/create_or_get_thread", methods=["POST"])
+    '''@app.route("/acs/chat/create_or_get_thread", methods=["POST"])
     def create_or_get_thread():
         """
         Expects JSON like:
@@ -1090,7 +1101,91 @@ def create_app():
         return None
 
     def store_new_thread_in_db(userA, userB, thread_id):
+        pass'''
+        
+    '''def store_new_thread_in_db(userA, userB, thread_id, topic, participants):
+        """
+        Insert a record linking userA and userB to the ACS thread.
+        - participants should be a list of dicts with keys: "id", "displayName".
+        """
+        new_thread = ChatThread(
+            thread_id=thread_id,
+            topic=topic,
+            participants=participants,
+            last_updated=datetime.utcnow()
+        )
+        db.session.add(new_thread)
+        db.session.commit()'''
+
+    @app.route("/acs/chat/create_or_get_thread", methods=["POST"])
+    def create_or_get_thread():
+        try:
+            data = request.get_json()
+            participant1_id = data.get("participant1_id")
+            participant2_id = data.get("participant2_id")
+            acs_token = data.get("acs_token")
+            topic = data.get("topic", "New Chat")
+
+            if not participant1_id or not participant2_id or not acs_token:
+                return jsonify({"error": "participant1_id, participant2_id, and acs_token are required"}), 400
+
+            # If you have a DB check:
+            existing_thread = check_existing_thread_in_db(participant1_id, participant2_id)
+            if existing_thread:
+                return jsonify({"threadId": existing_thread, "createdNew": False}), 200
+
+            chat_client = create_chat_client(acs_user_id=participant1_id, acs_token=acs_token)
+
+            participants = [
+                {
+                    "id": {"communicationUserId": participant1_id},
+                    "displayName": "User1"
+                },
+                {
+                    "id": {"communicationUserId": participant2_id},
+                    "displayName": "User2"
+                }
+            ]
+
+            # Build the single dictionary for older ACS Chat SDK:
+            request_dict = {
+                "topic": topic,
+                "participants": participants
+            }
+
+            response = chat_client.create_chat_thread(request_dict)
+            new_thread_id = response.chat_thread.id
+
+            store_new_thread_in_db(participant1_id, participant2_id, new_thread_id)
+
+            return jsonify({"threadId": new_thread_id, "createdNew": True}), 200
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+
+
+
+    def check_existing_thread_in_db(userA, userB):
+        """
+        Stub implementation:
+        Query your database for an existing chat thread between userA and userB.
+        Return the ACS thread ID if found; otherwise, return None.
+        """
+        # In a real implementation, query your chat_threads table.
+        return None
+
+
+    def store_new_thread_in_db(userA, userB, thread_id):
+        """
+        Stub implementation:
+        Store a new record in your database linking userA and userB to the ACS thread ID.
+        """
+        # In a real implementation, insert a row into your chat_threads table.
         pass
+
+
 
 
 

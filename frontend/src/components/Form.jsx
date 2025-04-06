@@ -18,12 +18,13 @@ function Form({ route, method }) {
 
     try {
       const res = await api.post(route, { username, password });
-      
+
       if (method === "login") {
         localStorage.setItem(ACCESS_TOKEN, res.data.access_token);
         localStorage.setItem(REFRESH_TOKEN, res.data.refresh_token);
         localStorage.setItem("user_acs_id", res.data.user_acs_id);
         localStorage.setItem("user_acs_token", res.data.user_acs_token);
+        localStorage.setItem("acs_endpoint", res.data.acs_endpoint);
         navigate("/");
       } else {
         navigate("/login");

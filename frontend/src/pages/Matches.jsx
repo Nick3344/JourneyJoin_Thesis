@@ -9,7 +9,7 @@ function Matches() {
 
   const currentUserAcsId = localStorage.getItem("user_acs_id");
 
-const handleMessageClick = async (user) => {
+/*const handleMessageClick = async (user) => {
   const currentUserAcsId = localStorage.getItem("user_acs_id");
   if (!currentUserAcsId || !user.acsId) {
     alert("ACS ID missing for current or matched user.");
@@ -28,7 +28,32 @@ const handleMessageClick = async (user) => {
     console.error("Failed to create chat thread:", err);
     alert("Failed to start chat.");
   }
+};*/
+const handleMessageClick = async (matchedUser) => {
+  const currentUserAcsId = localStorage.getItem("user_acs_id");
+  const currentUserAcsToken = localStorage.getItem("user_acs_token");
+  if (!currentUserAcsId || !currentUserAcsToken || !matchedUser.acsId) {
+    alert("Missing ACS ID or token. Please log in again.");
+    return;
+  }
+  
+  const payload = {
+    participant1_id: currentUserAcsId,
+    participant2_id: matchedUser.acsId,
+    acs_token: currentUserAcsToken,
+    topic: `Chat between ${matchedUser.username} and You`
+  };
+
+  try {
+    const res = await api.post("/acs/chat/create_or_get_thread", payload);
+    const { threadId } = res.data;
+    navigate("/acs/chat/thread", { state: { threadId, topic: payload.topic } });
+  } catch (err) {
+    console.error("Error creating chat thread:", err);
+    alert("Failed to start chat.");
+  }
 };
+
 
 
   return (

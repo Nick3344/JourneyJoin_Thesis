@@ -148,5 +148,15 @@ class Guide(db.Model):
 
     def __repr__(self):
         return f"<Guide {self.username}>"
+    
+class ChatThread(db.Model):
+    __tablename__ = "chat_threads"
+    thread_id = db.Column(db.String(255), primary_key=True)
+    topic = db.Column(db.String(255), nullable=False)
+    participants = db.Column(db.JSON, nullable=False)  
+    last_updated = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<ChatThread {self.thread_id} - {self.topic}>"
 
 

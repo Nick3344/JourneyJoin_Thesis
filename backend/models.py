@@ -158,5 +158,21 @@ class ChatThread(db.Model):
 
     def __repr__(self):
         return f"<ChatThread {self.thread_id} - {self.topic}>"
+    
+class ChatThreadMapping(db.Model):
+    __tablename__ = 'chat_thread_mappings'
+    id = db.Column(db.Integer, primary_key=True)
+    thread_id = db.Column(db.String(255), nullable=False)
+    participant1_id = db.Column(db.String(255), nullable=False)
+    participant2_id = db.Column(db.String(255), nullable=False)
+    topic = db.Column(db.String(255))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    @staticmethod
+    def get_thread_for_users(user1_id, user2_id):
+        return ChatThreadMapping.query.filter(
+            ((ChatThreadMapping.participant1_id == user1_id) & (ChatThreadMapping.participant2_id == user2_id)) |
+            ((ChatThreadMapping.participant1_id == user2_id) & (ChatThreadMapping.participant2_id == user1_id))
+        ).first()
 
 

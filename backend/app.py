@@ -1,3 +1,5 @@
+import eventlet
+eventlet.monkey_patch()
 import os
 import json
 import traceback
@@ -16,7 +18,7 @@ from flask_migrate import Migrate
 import openai
 
 from config import Config
-from models import ChatThread, db, User, Guide
+from models import ChatThread, ChatThreadMapping, db, User, Guide
 
 from azure.communication.chat import ChatClient
 from azure.communication.chat import CommunicationTokenCredential
@@ -24,6 +26,9 @@ from azure.communication.identity import CommunicationIdentityClient, Communicat
 from azure.communication.sms import SmsClient
 from azure.core.credentials import AzureKeyCredential, AccessToken
 #from azure.communication.chat._models import CreateChatThreadRequest
+from flask_socketio import SocketIO, emit, join_room, leave_room
+from azure.communication.chat import ChatParticipant
+
 
 
 class ACSKeyCredential(AzureKeyCredential):
@@ -31,6 +36,12 @@ class ACSKeyCredential(AzureKeyCredential):
         # Return a dummy access token using the key as the token value
         # and a far-future expiry (in epoch seconds). This is a workaround.
         return AccessToken(self._key, 9999999999)
+    
+'''def subscribe_to_notifications(chat_client, thread_id):
+    def on_message_received(event):
+        print(f"Message received in thread {event.thread_id}: {event.message_id}")
+
+    chat_client.add_event_handler(ChatEventType.CHAT_MESSAGE_RECEIVED, on_message_received)'''
 
 #connection_string = "endpoint=https://nickcomm.unitedstates.communication.azure.com/;accesskey=2P2k6d0KhkFtEf9mzB3pzVe7VptJtGqYmwEDuVwLiA6v5LgD7gdOJQQJ99BCACULyCpx7CfZAAAAAZCSOuzl"
 #chat_client = ChatClient.from_connection_string(connection_string)
@@ -52,6 +63,79 @@ def create_app():
     @app.route("/")
     def index():
         return jsonify({"message": "Backend is running!"})
+    
+
+
+
+    # Initialize SocketIO
+    socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
+    @socketio.on('connect')
+    def handle_connect():
+        print(f"Client connected: {request.sid}")
+        thread_id = request.args.get('threadId')
+        if thread_id:
+            join_room(thread_id)
+            print(f"Auto-joined thread: {thread_id}")
+
+
+    @socketio.on("disconnect")
+    def handle_disconnect():
+        print(f"Client disconnected: {request.sid}")
+
+    @socketio.on("join_thread")
+    def handle_join_thread(data):
+        thread_id = data.get("threadId")
+        if thread_id:
+            join_room(thread_id)
+            print(f"Client {request.sid} joined thread: {thread_id}")
+           # emit("thread_joined", {"status": "success", "threadId": thread_id}, room=request.sid)
+
+    @socketio.on("leave_thread")
+    def handle_leave_thread(data):
+        thread_id = data.get("threadId")
+        if thread_id:
+            leave_room(thread_id)
+            print(f"Client {request.sid} left thread: {thread_id}")
+
+    @socketio.on("send_message")
+    def handle_send_message(data):
+        try:
+            thread_id = data.get("threadId")
+            content = data.get("content")
+            sender_display_name = data.get("senderDisplayName", "Unknown")
+            acs_user_id = data.get("acs_user_id")
+            acs_token = data.get("acs_token")
+
+            if not all([thread_id, content, acs_user_id, acs_token]):
+                emit("error", {"error": "Missing required fields"}, room=request.sid)
+                return
+
+            # Store message in ACS
+            chat_client = create_chat_client(acs_user_id, acs_token)
+            thread_client = chat_client.get_chat_thread_client(thread_id)
+            
+            send_result = thread_client.send_message(
+                content=content,
+                sender_display_name=sender_display_name
+            )
+
+            # Broadcast the message to all clients in the thread
+            message_data = {
+                "id": send_result.id,
+                "threadId": thread_id,
+                "content": content,
+                "senderDisplayName": sender_display_name,
+                "createdOn": datetime.utcnow().isoformat()
+            }
+            
+            emit("new_message", message_data, room=thread_id)
+            print(f"Message broadcasted to thread {thread_id}")
+
+        except Exception as e:
+            print(f"Error sending message: {str(e)}")
+            emit("error", {"error": str(e)}, room=request.sid)
+    
 
     ##########################################################
     # Registration & Login
@@ -836,7 +920,83 @@ def create_app():
         return chat_client
 
 
+    @app.route("/acs/chat/find_or_create_thread", methods=["POST"])
+    def find_or_create_thread():
+        try:
+            data = request.get_json()
+            current_user_id = data.get("current_user_id")
+            other_user_id = data.get("other_user_id")
+            acs_token = data.get("acs_token")
+            
+            if not all([current_user_id, other_user_id, acs_token]):
+                return jsonify({"error": "Missing required fields"}), 400
 
+            # Create chat client using participant1's token (sender)
+            chat_client = create_chat_client(current_user_id, acs_token)
+            
+            # First try to find an existing thread between the two users
+            existing_thread = None
+            threads = chat_client.list_chat_threads()
+            for thread in threads:
+                participants = list(thread.list_participants())
+                # Use identifier.raw_id for both participants
+                participant_ids = [
+                    p.identifier.raw_id if hasattr(p.identifier, "raw_id") else str(p.identifier)
+                    for p in participants
+                ]
+                if current_user_id in participant_ids and other_user_id in participant_ids:
+                    existing_thread = thread
+                    break
+
+            if existing_thread:
+                return jsonify({
+                    "threadId": existing_thread.id,
+                    "topic": existing_thread.topic,
+                    "createdOn": existing_thread.created_on.isoformat()
+                }), 200
+
+            # No thread exists: create a new one.
+            topic = f"Chat between {current_user_id} and {other_user_id}"
+            # Create the thread (without participants)
+            create_result = chat_client.create_chat_thread({"topic": topic})
+            thread_id = create_result.chat_thread.id
+            thread_client = chat_client.get_chat_thread_client(thread_id)
+
+            # Build proper ChatParticipant objects for both users.
+            participants = [
+                ChatParticipant(
+                    identifier=CommunicationUserIdentifier(current_user_id),
+                    display_name="User 1"
+                ),
+                ChatParticipant(
+                    identifier=CommunicationUserIdentifier(other_user_id),
+                    display_name="User 2"
+                )
+            ]
+            # Add participants using the add_participants method.
+            thread_client.add_participants(participants=participants)
+            
+            # Optionally store the thread mapping in your local DB...
+            new_mapping = ChatThreadMapping(
+                thread_id=thread_id,
+                participant1_id=current_user_id,
+                participant2_id=other_user_id,
+                topic=topic
+            )
+            db.session.add(new_mapping)
+            db.session.commit()
+
+            return jsonify({
+                "threadId": thread_id,
+                "topic": topic,
+                "createdOn": create_result.chat_thread.created_on.isoformat()
+            }), 201
+
+        except Exception as e:
+            db.session.rollback()
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
 
     @app.route("/acs/chat/create_thread", methods=["POST"])
     def create_chat_thread():
@@ -885,24 +1045,53 @@ def create_app():
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
         
+        
     @app.route("/acs/chat/threads", methods=["GET"])
     def list_chat_threads():
         try:
-            chat_client = create_chat_client()
-            threads_iter = chat_client.list_chat_threads(results_per_page=50)
+            acs_user_id = request.args.get("acs_user_id")
+            acs_token = request.args.get("acs_token")
+
+            if not acs_user_id or not acs_token:
+                return jsonify({"error": "acs_user_id and acs_token are required"}), 400
+
+            print(f"Fetching threads for user {acs_user_id}")
+
+            # Get all threads where the user is either participant1 or participant2
+            thread_mappings = ChatThreadMapping.query.filter(
+                (ChatThreadMapping.participant1_id == acs_user_id) |
+                (ChatThreadMapping.participant2_id == acs_user_id)
+            ).all()
+
             threads = []
-            for thread_item in threads_iter:
-                threads.append({
-                    "thread_id": thread_item.id,
-                    "topic": thread_item.topic,
-                    "created_on": thread_item.created_on.isoformat() if thread_item.created_on else None
-                    # You can add more fields if needed
-                })
+            chat_client = create_chat_client(acs_user_id, acs_token)
+
+            for mapping in thread_mappings:
+                try:
+                    thread_client = chat_client.get_chat_thread_client(mapping.thread_id)
+                    
+                    # Get the other participant's ID
+                    other_participant_id = (
+                        mapping.participant2_id 
+                        if mapping.participant1_id == acs_user_id 
+                        else mapping.participant1_id
+                    )
+
+                    threads.append({
+                        "thread_id": mapping.thread_id,
+                        "topic": mapping.topic,
+                        "created_on": mapping.created_at.isoformat(),
+                        "other_participant_id": other_participant_id
+                    })
+                except Exception as e:
+                    print(f"Error processing thread {mapping.thread_id}: {str(e)}")
+                    continue
+
+            print(f"Found {len(threads)} threads for user {acs_user_id}")
             return jsonify(threads), 200
 
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            print(f"Error in list_chat_threads: {str(e)}")
             return jsonify({"error": str(e)}), 500
         
     @app.route("/acs/chat/add_participant", methods=["POST"])
@@ -931,117 +1120,143 @@ def create_app():
             import traceback
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
-
+        
 
     @app.route("/acs/chat/send_message", methods=["POST"])
     def send_message_to_thread():
-        data = request.get_json()
-        thread_id = data["threadId"]
-        content = data["content"]
-        sender_display_name = data.get("senderDisplayName", "Unknown")
-        acs_user_id = data.get("acs_user_id")
-        acs_token = data.get("acs_token")
-        if not acs_user_id or not acs_token:
-            return jsonify({"error": "acs_user_id and acs_token are required"}), 400
+        try:
+            data = request.get_json()
+            thread_id = data.get("threadId")
+            content = data.get("content")
+            sender_display_name = data.get("senderDisplayName")
+            acs_user_id = data.get("acs_user_id")
+            acs_token = data.get("acs_token")
 
-        chat_client = create_chat_client(acs_user_id, acs_token)
-        thread_client = chat_client.get_chat_thread_client(thread_id)
-        send_result = thread_client.send_message(
-            content=content,
-            sender_display_name=sender_display_name
-        )
-        return jsonify({"messageId": send_result.id}), 200
+            # Send message through ACS
+            chat_client = create_chat_client(acs_user_id, acs_token)
+            thread_client = chat_client.get_chat_thread_client(thread_id)
+            send_result = thread_client.send_message(
+                content=content,
+                sender_display_name=sender_display_name
+            )
+
+            # Broadcast the message via WebSocket
+            message_data = {
+                "id": send_result.id,
+                "threadId": thread_id,
+                "content": content,
+                "senderDisplayName": sender_display_name,
+                "createdOn": datetime.utcnow().isoformat()
+            }
+            socketio.emit("new_message", message_data, room=thread_id)
+
+            return jsonify(message_data), 200
+
+        except Exception as e:
+            print(f"Error in send_message: {str(e)}")
+            return jsonify({"error": str(e)}), 500
+
 
 
 
         
     @app.route("/acs/chat/get_messages", methods=["POST"])
     def get_messages():
-        data = request.get_json()
-        thread_id = data.get("threadId")
-        acs_user_id = data.get("acs_user_id")
-        acs_token = data.get("acs_token")
-        if not thread_id or not acs_user_id or not acs_token:
-            return jsonify({"error": "threadId, acs_user_id and acs_token are required"}), 400
-
-        chat_client = create_chat_client(acs_user_id, acs_token)
-        thread_client = chat_client.get_chat_thread_client(thread_id)
-        
-        messages_iter = thread_client.list_messages(results_per_page=50)
-        messages_list = []
-        for msg in messages_iter:
-            messages_list.append({
-                "id": msg.id,
-                "content": msg.content.message,
-                "senderDisplayName": msg.sender_display_name,
-                "createdOn": msg.created_on.isoformat() if msg.created_on else None
-            })
-        return jsonify(messages_list), 200
-
-
-
-
-
-    @app.route("/acs/chat/get_messages", methods=["POST"])
-    def list_chat_messages():
-        """
-        Expects JSON:
-        {
-        "threadId": "<chat thread ID>"
-        }
-        Returns a list of messages for that thread
-        """
+        print("Received get_messages request")  # Debug log
         try:
             data = request.get_json()
-            thread_id = data["threadId"]
+            if not data:
+                return jsonify({"error": "No JSON data received"}), 400
+                    
+            thread_id = data.get("threadId")
+            acs_user_id = data.get("acs_user_id")
+            acs_token = data.get("acs_token")
+                
+            print(f"Processing request - ThreadId: {thread_id}, UserId: {acs_user_id}")  # Debug log
+                
+            if not all([thread_id, acs_user_id, acs_token]):
+                missing = []
+                if not thread_id: missing.append("threadId")
+                if not acs_user_id: missing.append("acs_user_id")
+                if not acs_token: missing.append("acs_token")
+                return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
 
-            chat_client = create_chat_client()  # Your function to create ChatClient
+            # Create chat client using the provided user's token
+            chat_client = create_chat_client(acs_user_id, acs_token)
             thread_client = chat_client.get_chat_thread_client(thread_id)
+                
+            # Check if the requester is actually a participant
+            participants = list(thread_client.list_participants())
+            participant_ids = [
+                p.identifier.raw_id if hasattr(p.identifier, "raw_id") else str(p.identifier)
+                for p in participants
+            ]
+            print("Thread participants:", participant_ids)
+            if acs_user_id not in participant_ids:
+                return jsonify({"error": "Requester is not a participant in this thread"}), 403
 
-            messages_iter = thread_client.list_messages(results_per_page=50)
-            messages_list = []
-            for msg in messages_iter:
-                messages_list.append({
+            # Fetch messages
+            messages = []
+            messages_iterator = thread_client.list_messages()
+            for msg in messages_iterator:
+                # msg.content might be an object; adjust as needed according to your SDK version.
+                messages.append({
                     "id": msg.id,
-                    "content": msg.content.message,
-                    "senderDisplayName": msg.sender_display_name,
-                    "createdOn": msg.created_on.isoformat() if msg.created_on else None
+                    "content": msg.content.message if hasattr(msg.content, "message") else msg.content,
+                    "senderDisplayName": msg.sender_display_name or "Unknown",
+                    "createdOn": msg.created_on.isoformat() if msg.created_on else None,
+                    "threadId": thread_id
                 })
-            return jsonify(messages_list), 200
-
+                
+            print(f"Found {len(messages)} messages")  # Debug log
+            return jsonify(messages), 200
+                
         except Exception as e:
             import traceback
+            print("Error in get_messages:", str(e))
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
-        
+
     @app.route("/acs/chat/send_message", methods=["POST"])
     def send_message():
-        """
-        Expects JSON:
-        {
-        "threadId": "<chat thread ID>",
-        "content": "Hello world!",
-        "senderDisplayName": "Alice"
-        }
-        """
         try:
             data = request.get_json()
-            thread_id = data["threadId"]
-            content = data["content"]
-            sender_display_name = data.get("senderDisplayName", "Unknown")
-
-            chat_client = create_chat_client()
+            print(f"Received message data: {data}") # Add logging
+            
+            thread_id = data.get("threadId")
+            content = data.get("content")
+            sender_display_name = data.get("senderDisplayName")
+            acs_user_id = data.get("acs_user_id")
+            acs_token = data.get("acs_token")
+            
+            if not all([thread_id, content, acs_user_id, acs_token]):
+                return jsonify({"error": "Missing required fields"}), 400
+            
+            chat_client = create_chat_client(acs_user_id, acs_token)
             thread_client = chat_client.get_chat_thread_client(thread_id)
-
-            result = thread_client.send_message(
+            
+            send_result = thread_client.send_message(
                 content=content,
                 sender_display_name=sender_display_name
             )
-            return jsonify({"messageId": result.id}), 200
-
+            
+            print(f"Message sent successfully: {send_result.id}") # Add logging
+            
+            socketio.emit("new_message", {
+                "id": send_result.id,
+                "threadId": thread_id,
+                "content": content,
+                "senderDisplayName": sender_display_name,
+                "createdOn": datetime.utcnow().isoformat()
+            }, room=thread_id)
+            
+            return jsonify({
+                "messageId": send_result.id,
+                "status": "Message sent successfully"
+            }), 200
+            
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            print(f"Error in send_message: {str(e)}") # Add logging
             return jsonify({"error": str(e)}), 500
 
 
@@ -1121,73 +1336,86 @@ def create_app():
     def create_or_get_thread():
         try:
             data = request.get_json()
-            participant1_id = data.get("participant1_id")
-            participant2_id = data.get("participant2_id")
+            participant1_id = data.get("participant1_id")  # sender
+            participant2_id = data.get("participant2_id")  # receiver
             acs_token = data.get("acs_token")
             topic = data.get("topic", "New Chat")
 
-            if not participant1_id or not participant2_id or not acs_token:
-                return jsonify({"error": "participant1_id, participant2_id, and acs_token are required"}), 400
+            print(f"Creating/getting thread for {participant1_id} and {participant2_id}")
 
-            # If you have a DB check:
-            existing_thread = check_existing_thread_in_db(participant1_id, participant2_id)
-            if existing_thread:
-                return jsonify({"threadId": existing_thread, "createdNew": False}), 200
+            if not all([participant1_id, participant2_id, acs_token]):
+                return jsonify({"error": "Missing required fields"}), 400
 
-            chat_client = create_chat_client(acs_user_id=participant1_id, acs_token=acs_token)
+            # First check our database for existing thread
+            existing_mapping = ChatThreadMapping.query.filter(
+                ((ChatThreadMapping.participant1_id == participant1_id) & 
+                (ChatThreadMapping.participant2_id == participant2_id)) |
+                ((ChatThreadMapping.participant1_id == participant2_id) & 
+                (ChatThreadMapping.participant2_id == participant1_id))
+            ).first()
 
+            if existing_mapping:
+                print(f"Found existing thread: {existing_mapping.thread_id}")
+                return jsonify({
+                    "threadId": existing_mapping.thread_id,
+                    "topic": existing_mapping.topic,
+                    "createdNew": False
+                }), 200
+
+            # Create new thread
+            chat_client = create_chat_client(participant1_id, acs_token)
+            
+            # Create thread first
+            create_thread_result = chat_client.create_chat_thread(topic=topic)
+            thread_id = create_thread_result.chat_thread.id
+            thread_client = chat_client.get_chat_thread_client(thread_id)
+
+            # Add both participants to the thread
             participants = [
-                {
-                    "id": {"communicationUserId": participant1_id},
-                    "displayName": "User1"
-                },
-                {
-                    "id": {"communicationUserId": participant2_id},
-                    "displayName": "User2"
-                }
+                ChatParticipant(
+                    identifier=CommunicationUserIdentifier(participant1_id),
+                    display_name="User 1"  
+                ),
+                ChatParticipant(
+                    identifier=CommunicationUserIdentifier(participant2_id),
+                    display_name="User 2"
+                )
             ]
+            
+            print(f"Adding participants to thread {thread_id}")
+            thread_client.add_participants(participants)
 
-            # Build the single dictionary for older ACS Chat SDK:
-            request_dict = {
+            # Store in our database
+            new_mapping = ChatThreadMapping(
+                thread_id=thread_id,
+                participant1_id=participant1_id,
+                participant2_id=participant2_id,
+                topic=topic
+            )
+            db.session.add(new_mapping)
+            db.session.commit()
+
+            print(f"Created new thread: {thread_id}")
+            
+            # Emit socket event to notify receiver
+            socketio.emit('new_thread', {
+                'threadId': thread_id,
+                'topic': topic,
+                'participants': [participant1_id, participant2_id]
+            }, room=participant2_id)  # Send to receiver's room
+
+            return jsonify({
+                "threadId": thread_id,
                 "topic": topic,
-                "participants": participants
-            }
-
-            response = chat_client.create_chat_thread(request_dict)
-            new_thread_id = response.chat_thread.id
-
-            store_new_thread_in_db(participant1_id, participant2_id, new_thread_id)
-
-            return jsonify({"threadId": new_thread_id, "createdNew": True}), 200
+                "createdNew": True
+            }), 200
 
         except Exception as e:
+            db.session.rollback()
             import traceback
             traceback.print_exc()
+            print(f"Error creating/getting thread: {str(e)}")
             return jsonify({"error": str(e)}), 500
-
-
-
-    def check_existing_thread_in_db(userA, userB):
-        """
-        Stub implementation:
-        Query your database for an existing chat thread between userA and userB.
-        Return the ACS thread ID if found; otherwise, return None.
-        """
-        # In a real implementation, query your chat_threads table.
-        return None
-
-
-    def store_new_thread_in_db(userA, userB, thread_id):
-        """
-        Stub implementation:
-        Store a new record in your database linking userA and userB to the ACS thread ID.
-        """
-        # In a real implementation, insert a row into your chat_threads table.
-        pass
-
-
-
-
 
 
 
@@ -1248,10 +1476,20 @@ def create_app():
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
 
+    @socketio.on("connect")
+    def on_connect():
+        print("Client connected (again)")
+
+    @socketio.on("join_thread")
+    def on_join_thread(data):
+        # join_room logic
+        thread_id = data.get("threadId")
+        if thread_id:
+            join_room(thread_id)
+            print(f"Client joined thread: {thread_id}")
 
 
-
-        
+    app.socketio = socketio  
     return app
 
 
@@ -1261,7 +1499,8 @@ if __name__ == "__main__":
     app = create_app()
     with app.app_context():
         db.create_all()  
-    app.run(debug=True, port=5000)
+    #app.run(debug=True, port=5000)
+    app.socketio.run(app, debug=True, port=5000)
 
 
 

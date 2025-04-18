@@ -1162,58 +1162,103 @@ def create_app():
         
     @app.route("/acs/chat/get_messages", methods=["POST"])
     def get_messages():
-        print("Received get_messages request")  # Debug log
         try:
             data = request.get_json()
-            if not data:
-                return jsonify({"error": "No JSON data received"}), 400
-                    
             thread_id = data.get("threadId")
             acs_user_id = data.get("acs_user_id")
             acs_token = data.get("acs_token")
-                
-            print(f"Processing request - ThreadId: {thread_id}, UserId: {acs_user_id}")  # Debug log
-                
-            if not all([thread_id, acs_user_id, acs_token]):
-                missing = []
-                if not thread_id: missing.append("threadId")
-                if not acs_user_id: missing.append("acs_user_id")
-                if not acs_token: missing.append("acs_token")
-                return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
-
-            # Create chat client using the provided user's token
+            
+            if not thread_id or not acs_user_id or not acs_token:
+                return jsonify({"error": "Missing required data"}), 400
+            
             chat_client = create_chat_client(acs_user_id, acs_token)
             thread_client = chat_client.get_chat_thread_client(thread_id)
-                
-            # Check if the requester is actually a participant
-            participants = list(thread_client.list_participants())
-            participant_ids = [
-                p.identifier.raw_id if hasattr(p.identifier, "raw_id") else str(p.identifier)
-                for p in participants
-            ]
-            print("Thread participants:", participant_ids)
-            if acs_user_id not in participant_ids:
-                return jsonify({"error": "Requester is not a participant in this thread"}), 403
+            
+            messages_iter = thread_client.list_messages()
+            messages_list = []
 
-            # Fetch messages
-            messages = []
-            messages_iterator = thread_client.list_messages()
-            for msg in messages_iterator:
-                # msg.content might be an object; adjust as needed according to your SDK version.
-                messages.append({
+            for msg in messages_iter:
+                # Extract the ACS sender ID from the ACS message
+                raw_sender_id = None
+                if hasattr(msg.sender, "identifier") and hasattr(msg.sender.identifier, "raw_id"):
+                    raw_sender_id = msg.sender.identifier.raw_id
+                
+                # Find the user in DB if possible
+                db_user = None
+                if raw_sender_id:
+                    db_user = User.query.filter_by(acs_id=raw_sender_id).first()
+
+                if db_user:
+                    sender_id = db_user.acs_id  # e.g., "8:acs:xxxxxxxx"
+                    sender_name = db_user.username
+                else:
+                    sender_id = raw_sender_id or "unknown"
+                    sender_name = msg.sender_display_name or "Unknown"
+                
+                print(f"[get_messages] msg.id={msg.id} from={sender_id} name={sender_name}")
+
+                messages_list.append({
                     "id": msg.id,
-                    "content": msg.content.message if hasattr(msg.content, "message") else msg.content,
-                    "senderDisplayName": msg.sender_display_name or "Unknown",
-                    "createdOn": msg.created_on.isoformat() if msg.created_on else None,
-                    "threadId": thread_id
+                    "content": msg.content.message if hasattr(msg.content, "message") else str(msg.content),
+                    "senderId": sender_id,
+                    "senderDisplayName": sender_name,
+                    "createdOn": msg.created_on.isoformat() if msg.created_on else None
                 })
-                
-            print(f"Found {len(messages)} messages")  # Debug log
-            return jsonify(messages), 200
-                
+
+            return jsonify(messages_list), 200
+
         except Exception as e:
+            print(f"Error in get_messages: {str(e)}")
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+
+        
+    @app.route("/acs/chat/thread_info", methods=["POST"])
+    def get_thread_info():
+        try:
+            data = request.get_json()
+            thread_id = data.get("threadId")
+            current_user_id = data.get("acs_user_id")  # Changed from acs_id to acs_user_id
+            
+            print(f"Getting thread info - ThreadId: {thread_id}, UserId: {current_user_id}")
+                
+            if not thread_id or not current_user_id:
+                return jsonify({"error": "Missing required fields"}), 400
+
+            # Get thread mapping from database
+            thread_mapping = ChatThreadMapping.query.filter_by(thread_id=thread_id).first()
+            if not thread_mapping:
+                return jsonify({"error": "Thread not found"}), 404
+
+            # Determine which participant is the other user
+            other_participant_id = (
+                thread_mapping.participant2_id 
+                if thread_mapping.participant1_id == current_user_id 
+                else thread_mapping.participant1_id
+            )
+
+            # Get usernames from User model using acs_id field
+            current_user = User.query.filter_by(acs_id=current_user_id).first()
+            other_user = User.query.filter_by(acs_id=other_participant_id).first()
+
+            print(f"Current user found: {current_user is not None}, Other user found: {other_user is not None}")
+
+            return jsonify({
+                "threadId": thread_id,
+                "topic": thread_mapping.topic,
+                "currentParticipant": {
+                    "id": current_user_id,
+                    "username": current_user.username if current_user else "Unknown"
+                },
+                "otherParticipant": {
+                    "id": other_participant_id,
+                    "username": other_user.username if other_user else "Unknown"
+                }
+            }), 200
+
+        except Exception as e:
+            print(f"Error in get_thread_info: {str(e)}")
             import traceback
-            print("Error in get_messages:", str(e))
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
 
@@ -1221,42 +1266,57 @@ def create_app():
     def send_message():
         try:
             data = request.get_json()
-            print(f"Received message data: {data}") # Add logging
-            
             thread_id = data.get("threadId")
             content = data.get("content")
-            sender_display_name = data.get("senderDisplayName")
             acs_user_id = data.get("acs_user_id")
             acs_token = data.get("acs_token")
             
-            if not all([thread_id, content, acs_user_id, acs_token]):
-                return jsonify({"error": "Missing required fields"}), 400
-            
+            # Get the sender's info from database
+            sender = User.query.filter_by(acs_id=acs_user_id).first()
+            if not sender:
+                return jsonify({"error": "Sender not found"}), 404
+
+            # Get thread mapping to identify participants
+            thread_mapping = ChatThreadMapping.query.filter_by(thread_id=thread_id).first()
+            if not thread_mapping:
+                return jsonify({"error": "Thread mapping not found"}), 404
+
+            # Create chat client with sender's credentials
             chat_client = create_chat_client(acs_user_id, acs_token)
             thread_client = chat_client.get_chat_thread_client(thread_id)
             
+            # Send message using sender's actual username
             send_result = thread_client.send_message(
                 content=content,
-                sender_display_name=sender_display_name
+                sender_display_name=sender.username
             )
-            
-            print(f"Message sent successfully: {send_result.id}") # Add logging
-            
-            socketio.emit("new_message", {
+
+            # Create message data that includes both sender info and thread context
+            message_data = {
                 "id": send_result.id,
                 "threadId": thread_id,
                 "content": content,
-                "senderDisplayName": sender_display_name,
-                "createdOn": datetime.utcnow().isoformat()
-            }, room=thread_id)
+                "senderId": acs_user_id,  # This is crucial for message alignment
+                "senderDisplayName": sender.username,
+                "createdOn": datetime.utcnow().isoformat(),
+                "sender": {
+                    "id": acs_user_id,
+                    "username": sender.username
+                },
+                "receiver": {
+                    "id": thread_mapping.participant2_id if thread_mapping.participant1_id == acs_user_id 
+                        else thread_mapping.participant1_id
+                }
+            }
             
-            return jsonify({
-                "messageId": send_result.id,
-                "status": "Message sent successfully"
-            }), 200
+            # Emit to all participants in the thread
+            socketio.emit("new_message", message_data, room=thread_id)
+            
+            return jsonify(message_data), 200
             
         except Exception as e:
-            print(f"Error in send_message: {str(e)}") # Add logging
+            print(f"Error in send_message: {str(e)}")
+            traceback.print_exc()
             return jsonify({"error": str(e)}), 500
 
 

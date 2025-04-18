@@ -5,18 +5,19 @@ import "../styles/ThreadDetail.css";
 
 function ThreadDetail() {
   const location = useLocation();
-  const { threadId, topic } = location.state || {};
+  const { threadId } = location.state || {};
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [threadInfo, setThreadInfo] = useState(null);
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
   
   const acsUserId = localStorage.getItem("user_acs_id");
   const acsToken = localStorage.getItem("user_acs_token");
+  const currentUsername = localStorage.getItem("username");
 
-  // Fetch messages function with added status check for Forbidden (403)
   const fetchMessages = useCallback(async () => {
     if (!threadId || !acsUserId || !acsToken) return;
     
@@ -54,7 +55,35 @@ function ThreadDetail() {
     }
   }, [threadId, acsUserId, acsToken]);
 
-  // Socket connection effect
+  // Fetch thread info
+  useEffect(() => {
+    const fetchThreadInfo = async () => {
+      if (!threadId || !acsUserId) return;
+      
+      try {
+        const response = await fetch('/acs/chat/thread_info', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            threadId,
+            acs_user_id: acsUserId
+          })
+        });
+        
+        if (!response.ok) throw new Error('Failed to fetch thread info');
+        
+        const data = await response.json();
+        setThreadInfo(data);
+      } catch (err) {
+        console.error('Error fetching thread info:', err);
+        setError('Failed to load chat information');
+      }
+    };
+
+    fetchThreadInfo();
+  }, [threadId, acsUserId]);
+
+  // Socket connection
   useEffect(() => {
     if (!threadId || !acsUserId) return;
 
@@ -76,7 +105,6 @@ function ThreadDetail() {
       setMessages(prev => [...prev, message]);
     });
 
-    // Initial message fetch
     fetchMessages();
 
     return () => {
@@ -91,10 +119,9 @@ function ThreadDetail() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Updated handleSendMessage with check for Forbidden response
   const handleSendMessage = async () => {
     if (!newMessage.trim()) return;
-
+  
     try {
       const response = await fetch('/acs/chat/send_message', {
         method: 'POST',
@@ -102,27 +129,21 @@ function ThreadDetail() {
         body: JSON.stringify({
           threadId,
           content: newMessage.trim(),
-          senderDisplayName: "You",
+          senderDisplayName: currentUsername,
           acs_user_id: acsUserId,
           acs_token: acsToken
         }),
       });
-
-      if (response.status === 403) {
-        throw new Error('Forbidden: The token may not have permission to send messages.');
-      }
-      
+  
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.error || 'Failed to send message');
       }
-
-      // Optionally clear error on a successful send
-      setError('');
+  
       setNewMessage('');
     } catch (err) {
       console.error('Error sending message:', err);
-      setError(err.message || 'Failed to send message');
+      setError('Failed to send message: ' + err.message);
     }
   };
 
@@ -133,27 +154,33 @@ function ThreadDetail() {
   return (
     <div className="thread-detail-container">
       <div className="thread-header">
-        <h2>{topic || "Chat Thread"}</h2>
+        <h2>Chat with {threadInfo?.otherParticipant?.username || 'Unknown'}</h2>
       </div>
       <div className="messages-container">
         {loading && <div className="loading">Loading messages...</div>}
         {error && <div className="error">{error}</div>}
         
         <div className="messages-list">
-          {messages.map((msg, index) => (
-            <div 
-              key={msg.id || index}
-              className={`message-item ${msg.senderDisplayName === "You" ? "sent" : "received"}`}
-            >
-              <div className="message-sender">{msg.senderDisplayName}</div>
-              <div className="message-content">{msg.content}</div>
-              {msg.createdOn && (
-                <div className="message-time">
-                  {new Date(msg.createdOn).toLocaleTimeString()}
-                </div>
-              )}
-            </div>
-          ))}
+          {messages.map((msg, index) => {
+              const isCurrentUser = msg.senderId === acsUserId;
+              
+              return (
+                  <div 
+                      key={msg.id || index}
+                      className={`message-item ${isCurrentUser ? 'sent' : 'received'}`}
+                  >
+                      <div className="message-sender">
+                          {isCurrentUser ? 'You' : msg.senderDisplayName}
+                      </div>
+                      <div className="message-content">{msg.content}</div>
+                      {msg.createdOn && (
+                          <div className="message-time">
+                              {new Date(msg.createdOn).toLocaleTimeString()}
+                          </div>
+                      )}
+                  </div>
+              );
+          })}
           <div ref={messagesEndRef} />
         </div>
 

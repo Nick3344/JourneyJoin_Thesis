@@ -1,0 +1,100 @@
+/* Container for the header */
+.app-header {
+    display: flex;
+    align-items: center;
+    background-color: #007BFF; /* Primary theme color */
+    color: #fff;
+    padding: 0.5rem 1rem;  /* Reduced padding */
+    height: 60px;         /* Fixed header height */
+    position: relative;
+    z-index: 10;
+  }
+  
+  /* Hamburger container styling */
+  .hamburger-container {
+    cursor: pointer;
+  }
+  
+  /* Hamburger style */
+  .hamburger {
+    font-size: 1.5rem;
+    border: none;
+    background: none;
+    color: #fff;
+    cursor: pointer;
+  }
+  
+  /* Brand styling (your logo/text) */
+  .brand {
+    font-size: 1.25rem;  
+    font-weight: bold;
+    cursor: pointer;
+    flex-grow: 1; 
+    text-align: center; 
+  }
+  
+  /* Profile container styling */
+  .profile-container {
+    cursor: pointer;
+    margin-left: auto; /* Push to the right */
+    background: transparent !important;
+    padding: 0;
+  }
+  
+  /* Profile icon styling */
+  .profile-icon {
+    font-size: 1.5rem;
+    color: #fff;
+    background: transparent !important;
+  }
+  
+  /* Side menu styling (dropdown from hamburger) */
+  .side-menu {
+    position: absolute;
+    top: 60px;       
+    left: 0;
+    min-width: 200px;    
+    background-color: #fff;
+    color: #333;
+    border-radius: 0 0 10px 10px;  /* Slightly rounded bottom corners for the container */
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+    animation: slideDown 0.3s ease-out;
+    overflow: hidden;
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+  }
+  
+  .side-menu ul {
+    list-style: none;
+    margin: 0;
+    padding: 0.5rem; /* Small padding around the list */
+  }
+  
+  .side-menu li {
+    margin: 0.25rem 0;             /* Space between items */
+    padding: 0.75rem 1rem;         /* Roomy padding for easier clicking */
+    cursor: pointer;
+    border-radius: 8px;            /* Curved corners for each item */
+    transition: background-color 0.3s ease, color 0.3s ease,
+                box-shadow 0.3s ease;
+    border: none;                  /* Remove any border, if needed */
+  }
+  
+  /* Change background & text color on hover + subtle elevation */
+  .side-menu li:hover {
+    background-color: #F0F8FF;     /* Subtle highlight (AliceBlue) */
+    color: #007BFF;               /* Match the brand color on hover */
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+  }
+  
+  /* Simple slide-down animation */
+  @keyframes slideDown {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  

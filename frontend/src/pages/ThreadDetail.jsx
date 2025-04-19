@@ -101,9 +101,12 @@ function ThreadDetail() {
     });
 
     socketRef.current.on('new_message', (message) => {
-      console.log('New message received:', message);
-      setMessages(prev => [...prev, message]);
-    });
+           // 1) If this arrived from *me*, skip it (I’ll add it myself)
+           if (message.senderId === acsUserId) return;
+      
+           // 2) Otherwise append it once
+           setMessages(prev => [...prev, message]);
+         });
 
     fetchMessages();
 
@@ -119,33 +122,37 @@ function ThreadDetail() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSendMessage = async () => {
-    if (!newMessage.trim()) return;
+  // ThreadDetail.jsx
+
+const handleSendMessage = async () => {
+  const content = newMessage.trim();
+  if (!content) return;
+
+  try {
+    const response = await fetch("/acs/chat/send_message", {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        threadId,
+        content,
+        acs_user_id: acsUserId,
+        acs_token: acsToken
+      })
+    });
+    if (!response.ok) throw new Error("Failed to send");
+
+    const sentMsg = await response.json();
+
+    setMessages(prev => [...prev, sentMsg]);
+
+    setNewMessage("");
+  } catch (err) {
+    console.error(err);
+    setError("Could not send message");
+  }
+};
+
   
-    try {
-      const response = await fetch('/acs/chat/send_message', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          threadId,
-          content: newMessage.trim(),
-          senderDisplayName: currentUsername,
-          acs_user_id: acsUserId,
-          acs_token: acsToken
-        }),
-      });
-  
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to send message');
-      }
-  
-      setNewMessage('');
-    } catch (err) {
-      console.error('Error sending message:', err);
-      setError('Failed to send message: ' + err.message);
-    }
-  };
 
   if (!threadId) {
     return <div className="error-container">Invalid thread ID</div>;
@@ -162,7 +169,9 @@ function ThreadDetail() {
         
         <div className="messages-list">
           {messages.map((msg, index) => {
-              const isCurrentUser = msg.senderId === acsUserId;
+              const isCurrentUser =
+              msg.senderId === acsUserId || msg.sender_id === acsUserId;
+            
               
               return (
                   <div 

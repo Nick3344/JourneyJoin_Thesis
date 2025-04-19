@@ -1121,7 +1121,7 @@ def create_app():
             traceback.print_exc()
             return jsonify({"error": str(e)}), 500
         
-
+    '''
     @app.route("/acs/chat/send_message", methods=["POST"])
     def send_message_to_thread():
         try:
@@ -1154,7 +1154,7 @@ def create_app():
 
         except Exception as e:
             print(f"Error in send_message: {str(e)}")
-            return jsonify({"error": str(e)}), 500
+            return jsonify({"error": str(e)}), 500'''
 
 
 
@@ -1264,60 +1264,36 @@ def create_app():
 
     @app.route("/acs/chat/send_message", methods=["POST"])
     def send_message():
-        try:
-            data = request.get_json()
-            thread_id = data.get("threadId")
-            content = data.get("content")
-            acs_user_id = data.get("acs_user_id")
-            acs_token = data.get("acs_token")
-            
-            # Get the sender's info from database
-            sender = User.query.filter_by(acs_id=acs_user_id).first()
-            if not sender:
-                return jsonify({"error": "Sender not found"}), 404
+        data          = request.get_json()
+        thread_id     = data["threadId"]
+        content       = data["content"].strip()
+        acs_user_id   = data["acs_user_id"]
+        acs_token     = data["acs_token"]
 
-            # Get thread mapping to identify participants
-            thread_mapping = ChatThreadMapping.query.filter_by(thread_id=thread_id).first()
-            if not thread_mapping:
-                return jsonify({"error": "Thread mapping not found"}), 404
+        # Build client with the *real* sender’s credentials
+        chat_client   = create_chat_client(acs_user_id, acs_token)
+        thread_client = chat_client.get_chat_thread_client(thread_id)
 
-            # Create chat client with sender's credentials
-            chat_client = create_chat_client(acs_user_id, acs_token)
-            thread_client = chat_client.get_chat_thread_client(thread_id)
-            
-            # Send message using sender's actual username
-            send_result = thread_client.send_message(
-                content=content,
-                sender_display_name=sender.username
-            )
+        sender = User.query.filter_by(acs_id=acs_user_id).first()
+        display_name = sender.username if sender else "Unknown"
 
-            # Create message data that includes both sender info and thread context
-            message_data = {
-                "id": send_result.id,
-                "threadId": thread_id,
-                "content": content,
-                "senderId": acs_user_id,  # This is crucial for message alignment
-                "senderDisplayName": sender.username,
-                "createdOn": datetime.utcnow().isoformat(),
-                "sender": {
-                    "id": acs_user_id,
-                    "username": sender.username
-                },
-                "receiver": {
-                    "id": thread_mapping.participant2_id if thread_mapping.participant1_id == acs_user_id 
-                        else thread_mapping.participant1_id
-                }
-            }
-            
-            # Emit to all participants in the thread
-            socketio.emit("new_message", message_data, room=thread_id)
-            
-            return jsonify(message_data), 200
-            
-        except Exception as e:
-            print(f"Error in send_message: {str(e)}")
-            traceback.print_exc()
-            return jsonify({"error": str(e)}), 500
+        send_result = thread_client.send_message(
+            content            = content,
+            sender_display_name= display_name
+        )
+
+        message = {
+            "id"              : send_result.id,
+            "threadId"        : thread_id,
+            "content"         : content,
+            "senderId"        : acs_user_id,              
+            "senderDisplayName": display_name,
+            "createdOn"       : datetime.utcnow().isoformat()
+        }
+
+        app.socketio.emit("new_message", message, room=thread_id)
+        return jsonify(message), 201
+
 
 
     '''@app.route("/acs/chat/create_or_get_thread", methods=["POST"])
